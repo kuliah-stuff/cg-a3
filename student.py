@@ -246,39 +246,45 @@ def trace_path(ro, rd, scene, state, max_depth, use_roulette):
     L = np.zeros(3)
     beta = np.ones(3)
     for depth in range(max_depth):
-        if depth >= 3:
-            if rng_next(state) > min(0.95, np.max(beta)): return L
         prim, t = hit_scene(scene, ro, rd, EPS, INF)
         if (prim == -1):  
             print("background")
             L += beta * scene.background
             return L
         else:
-            material = scene.mat_id[prim]
+            row = scene.materials[scene.mat_id[prim]]
+            material = int(row[M_TYPE])
             if material == EMISSIVE:
-                L += beta * scene.materials[prim][4]
+                L += beta * row[M_EMISSION:M_EMISSION+3]
                 return L
-            if material == LAMBERTIAN:
-                rd = scatter_lambertian(rd, state)
-                beta = beta * scene.materials[prim][1]
-                print(beta)
-                continue
 
             p = ro + t*rd
             n = surface_normal(scene, prim, p)
-            if material == METAL:
+            
+            if material == LAMBERTIAN:
+                rd = scatter_lambertian(rd, state)
+                beta = beta * row[M_ALBEDO:M_ALBEDO+3]
+                print(beta)
+            elif material == METAL:
                 reflected, rd = scatter_metal(rd, 
                                             n,
-                                            scene.materials[prim][2],
+                                            row[M_ROUGHNESS],
                                             state)
                 if not reflected: break
                 else:
-                    beta = beta * scene.materials[prim][1]
+                    beta = beta * row[M_ALBEDO:M_ALBEDO+3]
             elif material == DIELECTRIC:
                 rd = scatter_dielectric(rd, 
                                    n,
                                    np.dot(rd, n) < 0,
-                                   scene.materials[prim][3],
+                                   row[M_IOR],
                                    state)
-                beta = beta * scene.materials[prim][1]
+                # its attenuation is (1, 1, 1), no change to beta
+
+        ro = p
+        if use_roulette and depth >= 3:
+            q = min(0.95, np.max(beta))
+            if rng_next(state) > q: return L
+            beta = beta/q
+    return L
             
