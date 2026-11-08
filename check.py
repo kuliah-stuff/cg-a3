@@ -132,6 +132,8 @@ def task4():
     rng = np.random.default_rng(4)
     lo = rng.uniform(-5, 5, (300, 3))
     bounds = np.stack([lo, lo + rng.uniform(0.05, 0.5, (300, 3))], axis=1)
+    # bounds[i] =  [[x_min, y_min, z_min],    # bounds[i, 0]  → min corner
+    #               [x_max, y_max, z_max]]    # bounds[i, 1]  → max corner
     node_min, node_max, node_left, node_first, node_count, order = student.build_bvh(bounds, 2)
     check('order is a permutation', sorted(order.tolist()) == list(range(300)))
     leaves = node_left < 0

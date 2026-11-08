@@ -198,7 +198,116 @@ def build_bvh(bounds, leaf_size):
     of primitives of the node, else make it a leaf.
     Check: python check.py 4
     """
-    raise NotImplementedError('Task 4: build_bvh')
+
+    N = bounds.shape[0]
+    size = 2*N-1
+    node_min = np.zeros(size, 3)
+    node_max = np.zeros(size, 3)
+    node_left = -np.ones(size)
+    node_first =  np.zeros(size)
+    node_count =  np.zeros(size)
+    order = np.array(range(N))
+    centroids = 0.5 * (bounds[:, 0] + bounds[:, 1])
+
+    node_min[0] = np.array(bounds[:, 0, 0].max(),
+                           bounds[:, 0, 1].max(),
+                           bounds[:, 0, 2].max())
+
+    node_max[0] = np.array(bounds[:, 1, 0].max(),
+                           bounds[:, 1, 1].max(),
+                           bounds[:, 1, 2].max())
+    next_free = 1
+    stack = [(0, 0, N)]
+
+    while(len(stack) > 0):
+        i, start, end = stack.pop()
+        n = end - start
+
+        if n <= leaf_size:
+            make_leaf(i, start, n)
+            continue
+
+        best_cost = INF
+        best_axis = -1
+        best_boudnary = -1
+
+        pdx, pdy, pdz  = node_max[i] - node_min[i]
+        sap = 2*(pdx*pdy + pdx*pdz + pdy*pdz)
+
+        # bins = [[]*12]
+        for axis in [0, 1, 2]:
+            cmin = min(centroids[p][axis] for p in range(start, end))
+            cmax = max(centroids[p][axis] for p in range(start, end))
+            range = cmax - cmin
+            if range < EPS:
+                continue
+
+            lcum_bin_count = np.zeros(12, np.int64)
+            lcum_bin_min   = np.full((12, 3),  INF)
+            lcum_bin_max   = np.full((12, 3), -INF)
+            for p in range(start, end):
+                b = np.floor(12 * (centroids[p][axis] - cmin) / range)
+                lcum_bin_count[b] += 1
+                lcum_bin_min[b] = np.minimum(lcum_bin_min[b], bounds[p, 0])
+                lcum_bin_max[b] = np.maximum(lcum_bin_max[b], bounds[p, 1])
+
+            rcum_bin_count = np.zeros(12, np.int64)
+            rcum_bin_min   = np.full((12, 3),  INF)
+            rcum_bin_max   = np.full((12, 3), -INF)
+            
+            for p in reversed(range(start, end)):
+                b = np.floor(12 * (centroids[p][axis] - cmin) / range)
+                rcum_bin_count[b] += 1
+                rcum_bin_min[b] = np.minimum(rcum_bin_min[b], bounds[p, 0])
+                rcum_bin_max[b] = np.maximum(rcum_bin_max[b], bounds[p, 1])
+
+            for i in range(12):
+                if lcum_bin_count[i] <= 0 or rcum_bin_count[i] <= 0: continue 
+                ldx, ldy, ldz = lcum_bin_max[i] - lcum_bin_min[i] 
+                sal = 2*(ldx*ldy + ldx*ldz + ldy*ldz)
+                rdx, rdy, rdz = rcum_bin_max[i] - rcum_bin_min[i]
+                sar = 2*(rdx*rdy + rdx*rdz + rdy*rdz)
+
+                cur_cost = (lcum_bin_count[i]*sal + rcum_bin_count[i]*sar)/sap
+                if cur_cost < best_cost:
+                    best_cost = cur_cost
+                    best_axis = axis
+                    best_boudnary = i
+
+        if best_cost == INF or best_cost > n:
+            make_leaf(i, start, n)
+            continue
+
+        # --- split ---
+        l = start
+        r = end - 1
+
+        cmin = min(centroids[p][best_axis] for p in range(start, end))
+        cmax = max(centroids[p][best_axis] for p in range(start, end))
+        range = cmax - cmin
+        while l < r:
+            if ((int) min(np.floor(12 * (centroids[l][axis] - cmin) / range), 11)) < b:
+                l += 1
+            else:
+                temp = order[l]
+                order[l] = order[r]
+                order[r] = temp
+                r -= 1
+        
+        m = l
+        L = next_free
+        R = L + 1
+        next_free += 2
+        node_left[i] = L
+        node_min[L] = lcum_bin_min[best_boudnary]
+        node_max[L] = lcum_bin_max[best_boudnary]
+        node_min[R] = rcum_bin_min[best_boudnary]
+        node_max[R] = rcum_bin_max[best_boudnary]
+
+
+    def make_leaf(i, start, n):
+        node_first[i] = start;  node_count[i] = n
+
 
 
 @njit(cache=True)
