@@ -58,7 +58,7 @@ def hit_triangle(v0, v1, v2, ro, rd, t_min, t_max):
     u = np.dot(s, h)/a
     q = np.cross(s, e1)
     v = np.dot(rd, q)/a
-    if u+v > 1: return INF
+    if u+v > 1 or u < 0 or u > 1 or v < 0: return INF
     t = np.dot(e2, q)/a
 
     return t if t <= t_max and t >= t_min else INF
@@ -92,9 +92,15 @@ def scatter_lambertian(n, state):
     """Task 2. Cosine-weighted unit direction around the unit normal n.
 
     Check: python check.py 2
+
+    Cause: the return line of scatter_lambertian, return normalize(dir) if ... else n, mixes two arrays in one ternary. Inside trace_path, n has a different array layout, so Numba types the result as Optional. That Optional is what failed at np.cross(rd, ...) in hit_triangle.
     """
     dir = n + rng_unit_vector(state)
-    return normalize(dir) if np.linalg.norm(dir) >= 1e-12 else n
+    sq = dot(dir, dir)
+    if sq < 1e-12:
+        return n.copy()
+    return dir / math.sqrt(sq)
+
 
 
 @njit(cache=True)
@@ -248,7 +254,7 @@ def trace_path(ro, rd, scene, state, max_depth, use_roulette):
     for depth in range(max_depth):
         prim, t = hit_scene(scene, ro, rd, EPS, INF)
         if (prim == -1):  
-            print("background")
+            # print("background")
             L += beta * scene.background
             return L
         else:
@@ -260,11 +266,13 @@ def trace_path(ro, rd, scene, state, max_depth, use_roulette):
 
             p = ro + t*rd
             n = surface_normal(scene, prim, p)
+            front = np.dot(rd, n) < 0
+            n = n if front else -n
             
             if material == LAMBERTIAN:
-                rd = scatter_lambertian(rd, state)
+                rd = scatter_lambertian(n, state)
                 beta = beta * row[M_ALBEDO:M_ALBEDO+3]
-                print(beta)
+                # print(beta)
             elif material == METAL:
                 reflected, rd = scatter_metal(rd, 
                                             n,
@@ -276,7 +284,7 @@ def trace_path(ro, rd, scene, state, max_depth, use_roulette):
             elif material == DIELECTRIC:
                 rd = scatter_dielectric(rd, 
                                    n,
-                                   np.dot(rd, n) < 0,
+                                   front,
                                    row[M_IOR],
                                    state)
                 # its attenuation is (1, 1, 1), no change to beta
