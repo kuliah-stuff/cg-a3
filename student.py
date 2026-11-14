@@ -200,114 +200,181 @@ def build_bvh(bounds, leaf_size):
     """
 
     N = bounds.shape[0]
-    size = 2*N-1
-    node_min = np.zeros(size, 3)
-    node_max = np.zeros(size, 3)
-    node_left = -np.ones(size)
-    node_first =  np.zeros(size)
-    node_count =  np.zeros(size)
-    order = np.array(range(N))
+    size = 2 * N - 1                      # a binary tree with N leaves has at most 2N-1 nodes
+    node_min = np.zeros((size, 3))
+    node_max = np.zeros((size, 3))
+    node_left = -np.ones(size, np.int64)  # int arrays: these hold indices
+    node_first = np.zeros(size, np.int64)
+    node_count = np.zeros(size, np.int64)
+    order = np.arange(N)
     centroids = 0.5 * (bounds[:, 0] + bounds[:, 1])
 
-    node_min[0] = np.array(bounds[:, 0, 0].max(),
-                           bounds[:, 0, 1].max(),
-                           bounds[:, 0, 2].max())
+    # root box: min over the min corners, max over the max corners
+    for d in range(3):
+        node_min[0, d] = bounds[:, 0, d].min()
+        node_max[0, d] = bounds[:, 1, d].max()
 
-    node_max[0] = np.array(bounds[:, 1, 0].max(),
-                           bounds[:, 1, 1].max(),
-                           bounds[:, 1, 2].max())
     next_free = 1
-    stack = [(0, 0, N)]
+    # explicit stack of (node index, start, end); at most `size` entries are ever needed
+    stack_node = np.zeros(size, np.int64)
+    stack_start = np.zeros(size, np.int64)
+    stack_end = np.zeros(size, np.int64)
+    sp = 1
+    stack_node[0] = 0
+    stack_start[0] = 0
+    stack_end[0] = N
 
-    while(len(stack) > 0):
-        i, start, end = stack.pop()
+    while sp > 0:
+        sp -= 1
+        i = stack_node[sp]
+        start = stack_start[sp]
+        end = stack_end[sp]
         n = end - start
 
         if n <= leaf_size:
-            make_leaf(i, start, n)
+            node_first[i] = start
+            node_count[i] = n
             continue
+
+        pdx = node_max[i, 0] - node_min[i, 0]
+        pdy = node_max[i, 1] - node_min[i, 1]
+        pdz = node_max[i, 2] - node_min[i, 2]
+        sap = 2.0 * (pdx * pdy + pdx * pdz + pdy * pdz)
+        if sap < 1e-30:
+            sap = 1e-30                   # avoid dividing by zero for a degenerate node
 
         best_cost = INF
         best_axis = -1
-        best_boudnary = -1
+        best_boundary = -1
+        best_cmin = 0.0
+        best_extent = 1.0
+        best_lmin = np.zeros(3)
+        best_lmax = np.zeros(3)
+        best_rmin = np.zeros(3)
+        best_rmax = np.zeros(3)
 
-        pdx, pdy, pdz  = node_max[i] - node_min[i]
-        sap = 2*(pdx*pdy + pdx*pdz + pdy*pdz)
+        for axis in range(3):
+            cmin = INF
+            cmax = -INF
+            for k in range(start, end):
+                c = centroids[order[k], axis]
+                if c < cmin: cmin = c
+                if c > cmax: cmax = c
+            extent = cmax - cmin          # renamed from `range`, which shadowed the builtin
+            if extent < 1e-12:
+                continue                  # all centroids coincide on this axis: cannot bin
 
-        # bins = [[]*12]
-        for axis in [0, 1, 2]:
-            cmin = min(centroids[p][axis] for p in range(start, end))
-            cmax = max(centroids[p][axis] for p in range(start, end))
-            range = cmax - cmin
-            if range < EPS:
-                continue
+            # 1) per-bin count and tight box (each bin only sees its own primitives)
+            bin_count = np.zeros(12, np.int64)
+            bin_min = np.full((12, 3), INF)
+            bin_max = np.full((12, 3), -INF)
+            for k in range(start, end):
+                p = order[k]
+                b = min(int(12 * (centroids[p, axis] - cmin) / extent), 11)
+                bin_count[b] += 1
+                for d in range(3):
+                    bin_min[b, d] = min(bin_min[b, d], bounds[p, 0, d])
+                    bin_max[b, d] = max(bin_max[b, d], bounds[p, 1, d])
 
-            lcum_bin_count = np.zeros(12, np.int64)
-            lcum_bin_min   = np.full((12, 3),  INF)
-            lcum_bin_max   = np.full((12, 3), -INF)
-            for p in range(start, end):
-                b = np.floor(12 * (centroids[p][axis] - cmin) / range)
-                lcum_bin_count[b] += 1
-                lcum_bin_min[b] = np.minimum(lcum_bin_min[b], bounds[p, 0])
-                lcum_bin_max[b] = np.maximum(lcum_bin_max[b], bounds[p, 1])
+            # 2) left sweep: entry b describes bins 0..b-1, i.e. everything left of boundary b
+            left_count = np.zeros(12, np.int64)
+            left_min = np.full((12, 3), INF)
+            left_max = np.full((12, 3), -INF)
+            run_count = 0
+            run_min = np.full(3, INF)
+            run_max = np.full(3, -INF)
+            for b in range(1, 12):
+                run_count += bin_count[b - 1]
+                for d in range(3):
+                    run_min[d] = min(run_min[d], bin_min[b - 1, d])
+                    run_max[d] = max(run_max[d], bin_max[b - 1, d])
+                left_count[b] = run_count
+                left_min[b] = run_min
+                left_max[b] = run_max
 
-            rcum_bin_count = np.zeros(12, np.int64)
-            rcum_bin_min   = np.full((12, 3),  INF)
-            rcum_bin_max   = np.full((12, 3), -INF)
-            
-            for p in reversed(range(start, end)):
-                b = np.floor(12 * (centroids[p][axis] - cmin) / range)
-                rcum_bin_count[b] += 1
-                rcum_bin_min[b] = np.minimum(rcum_bin_min[b], bounds[p, 0])
-                rcum_bin_max[b] = np.maximum(rcum_bin_max[b], bounds[p, 1])
+            # 3) right sweep: entry b describes bins b..11, i.e. everything right of boundary b
+            right_count = np.zeros(12, np.int64)
+            right_min = np.full((12, 3), INF)
+            right_max = np.full((12, 3), -INF)
+            run_count = 0
+            run_min = np.full(3, INF)
+            run_max = np.full(3, -INF)
+            for b in range(11, 0, -1):
+                run_count += bin_count[b]
+                for d in range(3):
+                    run_min[d] = min(run_min[d], bin_min[b, d])
+                    run_max[d] = max(run_max[d], bin_max[b, d])
+                right_count[b] = run_count
+                right_min[b] = run_min
+                right_max[b] = run_max
 
-            for i in range(12):
-                if lcum_bin_count[i] <= 0 or rcum_bin_count[i] <= 0: continue 
-                ldx, ldy, ldz = lcum_bin_max[i] - lcum_bin_min[i] 
-                sal = 2*(ldx*ldy + ldx*ldz + ldy*ldz)
-                rdx, rdy, rdz = rcum_bin_max[i] - rcum_bin_min[i]
-                sar = 2*(rdx*rdy + rdx*rdz + rdy*rdz)
+            # 4) SAH cost of each of the 11 boundaries
+            for b in range(1, 12):        # `b`, not `i`: `i` is the current node index
+                if left_count[b] == 0 or right_count[b] == 0:
+                    continue
+                ldx = left_max[b, 0] - left_min[b, 0]
+                ldy = left_max[b, 1] - left_min[b, 1]
+                ldz = left_max[b, 2] - left_min[b, 2]
+                sal = 2.0 * (ldx * ldy + ldx * ldz + ldy * ldz)
+                rdx = right_max[b, 0] - right_min[b, 0]
+                rdy = right_max[b, 1] - right_min[b, 1]
+                rdz = right_max[b, 2] - right_min[b, 2]
+                sar = 2.0 * (rdx * rdy + rdx * rdz + rdy * rdz)
 
-                cur_cost = (lcum_bin_count[i]*sal + rcum_bin_count[i]*sar)/sap
+                cur_cost = 1.0 + (left_count[b] * sal + right_count[b] * sar) / sap
                 if cur_cost < best_cost:
                     best_cost = cur_cost
                     best_axis = axis
-                    best_boudnary = i
+                    best_boundary = b
+                    best_cmin = cmin
+                    best_extent = extent
+                    # keep the child boxes now: these arrays are overwritten on the next axis
+                    best_lmin = left_min[b].copy()
+                    best_lmax = left_max[b].copy()
+                    best_rmin = right_min[b].copy()
+                    best_rmax = right_max[b].copy()
 
-        if best_cost == INF or best_cost > n:
-            make_leaf(i, start, n)
+        # keep the node as a leaf when no split exists or splitting is not cheaper
+        if best_axis < 0 or best_cost >= n:
+            node_first[i] = start
+            node_count[i] = n
             continue
 
-        # --- split ---
+        # --- split: partition order[start:end] in place, left-bin primitives first ---
         l = start
         r = end - 1
-
-        cmin = min(centroids[p][best_axis] for p in range(start, end))
-        cmax = max(centroids[p][best_axis] for p in range(start, end))
-        range = cmax - cmin
-        while l < r:
-            if ((int) min(np.floor(12 * (centroids[l][axis] - cmin) / range), 11)) < b:
+        while l <= r:
+            p = order[l]                  # `l` is a position in `order`, not a primitive id
+            b = min(int(12 * (centroids[p, best_axis] - best_cmin) / best_extent), 11)
+            if b < best_boundary:
                 l += 1
             else:
                 temp = order[l]
                 order[l] = order[r]
                 order[r] = temp
                 r -= 1
-        
         m = l
+
         L = next_free
         R = L + 1
         next_free += 2
         node_left[i] = L
-        node_min[L] = lcum_bin_min[best_boudnary]
-        node_max[L] = lcum_bin_max[best_boudnary]
-        node_min[R] = rcum_bin_min[best_boudnary]
-        node_max[R] = rcum_bin_max[best_boudnary]
+        node_min[L] = best_lmin
+        node_max[L] = best_lmax
+        node_min[R] = best_rmin
+        node_max[R] = best_rmax
 
+        stack_node[sp] = R
+        stack_start[sp] = m
+        stack_end[sp] = end
+        sp += 1
+        stack_node[sp] = L
+        stack_start[sp] = start
+        stack_end[sp] = m
+        sp += 1
 
-    def make_leaf(i, start, n):
-        node_first[i] = start;  node_count[i] = n
-
+    return (node_min[:next_free], node_max[:next_free], node_left[:next_free],
+            node_first[:next_free], node_count[:next_free], order)
 
 
 @njit(cache=True)
